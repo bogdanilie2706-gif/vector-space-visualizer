@@ -1,6 +1,6 @@
 # Vector Space Visualizer
 
-An interactive tool for exploring vectors, spans, and linear transformations in 2D/3D — built with [Dash](https://dash.plotly.com/) and Plotly.
+An interactive tool for exploring vectors, spans, and linear transformations in 2D/3D — built with Dash and Plotly.
 
 ## Status
 
@@ -17,7 +17,7 @@ Work in progress. Milestone 1 (core vector plotting) in progress.
 ## Running locally
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
 python app/main.py
