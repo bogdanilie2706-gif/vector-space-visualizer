@@ -1,6 +1,7 @@
 import dash
 from dash import dcc, html
 import plotly.graph_objects as go
+import math
 
 
 def make_vector_traces(start: dict, end: dict, color: str = "royalblue") -> list:
@@ -50,11 +51,31 @@ def make_scene_figure(vectors: list) -> go.Figure:
         for trace in traces:
             fig.add_trace(trace)
 
+    # Collect every coordinate from every vector 
+    x_values = [] 
+    y_values = [] 
+    z_values = []
+
+    for vector in vectors: 
+        x_values.extend([vector["start"]["x"], vector["end"]["x"]]) 
+        y_values.extend([vector["start"]["y"], vector["end"]["y"]]) 
+        z_values.extend([vector["start"]["z"], vector["end"]["z"]])
+
+    # Find the largest absolute coordinate 
+    max_extent = max( 
+        max(abs(x) for x in x_values), 
+        max(abs(y) for y in y_values), 
+        max(abs(z) for z in z_values), 
+        5, # Minimum range of [-5, 5]
+    )
+
+    max_extent = math.ceil(max_extent * 1.2)
+
     fig.update_layout(
         scene=dict(
-            xaxis=dict(range=[-5, 5], title="x"),
-            yaxis=dict(range=[-5, 5], title="y"),
-            zaxis=dict(range=[-5, 5], title="z"),
+            xaxis=dict(range=[-max_extent, max_extent], title="x"),
+            yaxis=dict(range=[-max_extent, max_extent], title="y"),
+            zaxis=dict(range=[-max_extent, max_extent], title="z"),
             aspectmode="cube",
         ),
         margin=dict(l=0, r=0, t=30, b=0),
