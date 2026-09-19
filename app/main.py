@@ -181,6 +181,21 @@ def build_slider_cards(vectors: list) -> list:
     touching any vector's stored slider_range."""
     return [vector_slider_group(i, vector) for i, vector in enumerate(vectors)]
 
+def span_input_row(index: int) -> html.Div:
+    """One row of x/y/z inputs for the span feature, identified by
+    `index` so a variable number of rows can exist at once."""
+    return html.Div(
+        children=[
+            dcc.Input(id={"type": "span-row-input", "axis": "x", "index": index},
+                       type="number", placeholder="x", value=0, style={"width": "60px"}),
+            dcc.Input(id={"type": "span-row-input", "axis": "y", "index": index},
+                       type="number", placeholder="y", value=0, style={"width": "60px"}),
+            dcc.Input(id={"type": "span-row-input", "axis": "z", "index": index},
+                       type="number", placeholder="z", value=0, style={"width": "60px"}),
+        ],
+        style={"display": "flex", "gap": "10px", "margin-top": "10px"},
+    )
+
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -212,6 +227,26 @@ app.layout = html.Div(
             ],
             style={"margin-bottom": "20px"},
         ),
+        dcc.Store(id="span-vectors-store", data=[]),
+        html.Div(
+            children=[
+                html.Button("+ Span", id="toggle-span-button", n_clicks=0),
+                html.Div(
+                    id="span-fields",
+                    style={"display": "none", "flex-direction": "column", "gap": "10px", "margin-top": "10px"},
+                    children=[
+                        html.Div(
+                            id="span-input-rows",
+                            children=[span_input_row(0)],
+                        ),
+                        html.Button("+ Add another vector", id="add-span-row-button", n_clicks=0),
+                        html.Button("Show Span", id="show-span-button", n_clicks=0),
+                    ],
+                ),
+                html.Div(id="span-list-container"),  # step 2 will populate this
+            ],
+            style={"margin-bottom": "20px"},
+        ),
         dcc.Graph(id="vector-plot", figure=make_scene_figure([initial_vector])),
         html.Div(
             id="sliders-container",
@@ -237,6 +272,48 @@ def toggle_add_vector_fields(n_clicks, current_style):
         return {"display": "flex", "gap": "10px", "align-items": "center", "margin-top": "10px"}
     return {"display": "none"}
 
+# ---------------------------------------------------------------------------
+# Callback: collapsible add-span fields
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    dash.Output("span-fields", "style"),
+    dash.Input("toggle-span-button", "n_clicks"),
+    dash.State("span-fields", "style"),
+    prevent_initial_call=True,
+)
+def toggle_span_fields(n_clicks, current_style):
+    is_hidden = current_style.get("display") == "none"
+    if is_hidden:
+        return {"display": "flex", "gap": "10px", "align-items": "center", "margin-top": "10px"}
+    return {"display": "none"}
+
+@app.callback(
+    dash.Output("span-input-rows", "children"),
+    dash.Input("add-span-row-button", "n_clicks"),
+    dash.State("span-input-rows", "children"),
+    prevent_initial_call=True,
+)
+def add_span_row(n_clicks, current_rows):
+    if len(current_rows) >= 3:
+        return dash.no_update  # already at the max of 3 vectors
+    new_index = len(current_rows)
+    return current_rows + [span_input_row(new_index)]
+
+@app.callback(
+    dash.Output("span-vectors-store", "data"),
+    dash.Input("show-span-button", "n_clicks"),
+    dash.State({"type": "span-row-input", "axis": "x", "index": dash.ALL}, "value"),
+    dash.State({"type": "span-row-input", "axis": "y", "index": dash.ALL}, "value"),
+    dash.State({"type": "span-row-input", "axis": "z", "index": dash.ALL}, "value"),
+    prevent_initial_call=True,
+)
+def show_span(n_clicks, x_values, y_values, z_values):
+    span_vectors = [
+        {"x": x_values[i], "y": y_values[i], "z": z_values[i]}
+        for i in range(len(x_values))
+    ]
+    return span_vectors
 
 # ---------------------------------------------------------------------------
 # Callback: add / remove / drag — split into small helpers, dispatched by
