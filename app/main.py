@@ -172,7 +172,8 @@ def vector_slider_group(index: int, vector: dict) -> html.Div:
                 style={"display": "none"},
             ),
         ],
-        style={"padding": "10px", "border": "1px solid #ddd", "position": "relative"},
+        style={"padding": "16px", "border-radius": "12px", "background-color": "white",
+                "box-shadow": "0 2px 8px rgba(0, 0, 0, 0.08)", "position": "relative"},
     )
 
 
@@ -200,93 +201,106 @@ def span_input_row(index: int) -> html.Div:
 # ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
-app = dash.Dash(__name__)
+app = dash.Dash(__name__, assets_folder="../assets")
 app.title = "Vector Space Visualizer"
 
 initial_vector = build_vector(1, 1, 1)
 
 app.layout = html.Div(
-    className="app-container",
     children=[
-        html.H1("Vector Space Visualizer"),
-        html.P("Plot, add, and scale vectors in 2D/3D."),
-        dcc.Store(id="vectors-store", data=[initial_vector]),
         html.Div(
+            style={"display": "flex", "gap": "20px"},
             children=[
-                html.Button("+ Add Vector", id="toggle-add-vector-button", n_clicks=0),
                 html.Div(
-                    id="add-vector-fields",
-                    style={"display": "none", "gap": "10px", "align-items": "center", "margin-top": "10px"},
+                    id="sidebar",
+                    style={"width": "60px", "flex-shrink": "0","display": "flex", "flex-direction": "column",
+                            "gap": "10px","transition": "width 0.2s", "padding-top": "20px", "padding-left": "10px",
+                            "padding-right": "10px", "box-shadow": "2px 0 12px rgba(0, 0, 0, 0.5)", "background-color": "gray",
+                    },
                     children=[
-                        dcc.Input(id="input-x", type="number", placeholder="x", value=0, style={"width": "60px"}),
-                        dcc.Input(id="input-y", type="number", placeholder="y", value=0, style={"width": "60px"}),
-                        dcc.Input(id="input-z", type="number", placeholder="z", value=0, style={"width": "60px"}),
-                        html.Button("Create Vector", id="add-vector-button", n_clicks=0),
-                    ],
-                ),
-            ],
-            style={"margin-bottom": "20px"},
-        ),
-        dcc.Store(id="span-vectors-store", data=[]),
-        html.Div(
-            children=[
-                html.Button("+ Span", id="toggle-span-button", n_clicks=0),
-                html.Div(
-                    id="span-fields",
-                    style={"display": "none", "flex-direction": "column", "gap": "10px", "margin-top": "10px"},
-                    children=[
+                        dcc.Store(id="vectors-store", data=[initial_vector]),
+                        dcc.Store(id="span-vectors-store", data=[]),
+                        dcc.Store(id="sidebar-state", data={"add_vector_open": False, "span_open": False}),
+
+                        html.Button("+ Add Vector", id="toggle-add-vector-button", n_clicks=0),
                         html.Div(
-                            id="span-input-rows",
-                            children=[span_input_row(0)],
+                            id="add-vector-fields",
+                            style={"display": "none", "flex-direction": "column", "gap": "10px", "margin-top": "10px"},
+                            children=[
+                                dcc.Input(id="input-x", type="number", placeholder="x", value=0, style={"width": "60px"}),
+                                dcc.Input(id="input-y", type="number", placeholder="y", value=0, style={"width": "60px"}),
+                                dcc.Input(id="input-z", type="number", placeholder="z", value=0, style={"width": "60px"}),
+                                html.Button("Create Vector", id="add-vector-button", n_clicks=0),
+                            ],
                         ),
-                        html.Button("+ Add another vector", id="add-span-row-button", n_clicks=0),
-                        html.Button("Show Span", id="show-span-button", n_clicks=0),
+
+                        html.Button("+ Span", id="toggle-span-button", n_clicks=0),
+                        html.Div(
+                            id="span-fields",
+                            style={"display": "none", "flex-direction": "column", "gap": "10px", "margin-top": "10px"},
+                            children=[
+                                html.Div(id="span-input-rows", children=[span_input_row(0)]),
+                                html.Button("+ Add another vector", id="add-span-row-button", n_clicks=0),
+                                html.Button("Show Span", id="show-span-button", n_clicks=0),
+                            ],
+                        ),
                     ],
                 ),
-                html.Div(id="span-list-container"),  # step 2 will populate this
+                html.Div(
+                    style={"flex-grow": "1"},
+                    children=[
+                        dcc.Graph(id="vector-plot", figure=make_scene_figure([initial_vector])),
+                    ],
+                ),
             ],
-            style={"margin-bottom": "20px"},
         ),
-        dcc.Graph(id="vector-plot", figure=make_scene_figure([initial_vector])),
         html.Div(
             id="sliders-container",
             children=build_slider_cards([initial_vector]),
-            style={"display": "grid", "grid-template-columns": "repeat(auto-fill, minmax(220px, 1fr))", "gap": "16px"},
+            style={"display": "grid", "grid-template-columns": "repeat(auto-fill, minmax(220px, 1fr))", "gap": "16px",
+                    "padding": "16px", "box-shadow": "60px 0 12px rgba(0, 0, 0, 0.3)", "background-color": "#f5f5f7", "position": "relative", "z-index": "1",},
         ),
     ],
 )
 
 
-# ---------------------------------------------------------------------------
-# Callback: collapsible add-vector fields
-# ---------------------------------------------------------------------------
 @app.callback(
+    dash.Output("sidebar", "style"),
     dash.Output("add-vector-fields", "style"),
-    dash.Input("toggle-add-vector-button", "n_clicks"),
-    dash.State("add-vector-fields", "style"),
-    prevent_initial_call=True,
-)
-def toggle_add_vector_fields(n_clicks, current_style):
-    is_hidden = current_style.get("display") == "none"
-    if is_hidden:
-        return {"display": "flex", "gap": "10px", "align-items": "center", "margin-top": "10px"}
-    return {"display": "none"}
-
-# ---------------------------------------------------------------------------
-# Callback: collapsible add-span fields
-# ---------------------------------------------------------------------------
-
-@app.callback(
     dash.Output("span-fields", "style"),
+    dash.Output("sidebar-state", "data"),
+    dash.Input("toggle-add-vector-button", "n_clicks"),
     dash.Input("toggle-span-button", "n_clicks"),
-    dash.State("span-fields", "style"),
+    dash.State("sidebar-state", "data"),
     prevent_initial_call=True,
 )
-def toggle_span_fields(n_clicks, current_style):
-    is_hidden = current_style.get("display") == "none"
-    if is_hidden:
-        return {"display": "flex", "gap": "10px", "align-items": "center", "margin-top": "10px"}
-    return {"display": "none"}
+def toggle_sidebar_sections(add_clicks, span_clicks, state):
+    triggered = dash.ctx.triggered_id
+
+    if triggered == "toggle-add-vector-button":
+        state["add_vector_open"] = not state["add_vector_open"]
+    elif triggered == "toggle-span-button":
+        state["span_open"] = not state["span_open"]
+
+    any_open = state["add_vector_open"] or state["span_open"]
+
+    sidebar_style = {
+        "width": "260px" if any_open else "60px",
+        "flex-shrink": "0","display": "flex", "flex-direction": "column",
+        "gap": "10px","transition": "width 0.2s", "padding-top": "20px", "padding-left": "10px",
+        "padding-right": "10px", "box-shadow": "2px 0 12px rgba(0, 0, 0, 0.5)",
+        "background-color": "gray"
+    }
+    add_vector_style = {
+        "display": "flex" if state["add_vector_open"] else "none",
+        "flex-direction": "row", "gap": "10px", "margin-top": "10px",
+    }
+    span_style = {
+        "display": "flex" if state["span_open"] else "none",
+        "flex-direction": "column", "gap": "10px", "margin-top": "10px",
+    }
+
+    return sidebar_style, add_vector_style, span_style, state
 
 @app.callback(
     dash.Output("span-input-rows", "children"),
