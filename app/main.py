@@ -126,11 +126,15 @@ def _compute_axis_extent(vectors: list) -> float:
         coords += [vector["start"]["y"], vector["end"]["y"]]
         coords += [vector["start"]["z"], vector["end"]["z"]]
 
+    if not coords:
+        return MIN_AXIS_EXTENT
+
     max_extent = max(max(abs(c) for c in coords), MIN_AXIS_EXTENT)
     return math.ceil(max_extent * 1.2)
 
 def make_scene_figure(vectors: list, spans: list | None = None,
-                      transform: list | None = None, blend: float = 1.0) -> go.Figure:
+                      transform: list | None = None, blend: float = 1.0,
+                      camera: dict | None = None) -> go.Figure:
     fig = go.Figure()
     extent = _compute_axis_extent(vectors)
     if transform:
@@ -152,6 +156,13 @@ def make_scene_figure(vectors: list, spans: list | None = None,
         for trace in make_transform_traces(transform, blend, vectors):
             fig.add_trace(trace)
 
+    if len(fig.data) == 0:
+        # Doar acum figura e cu adevărat goală — fără asta Plotly cade pe layout 2D.
+        fig.add_trace(go.Scatter3d(
+            x=[0], y=[0], z=[0], mode="markers", marker=dict(size=0, opacity=0),
+            showlegend=False, hoverinfo="skip",
+        ))
+
     if full_space_messages:
         fig.add_annotation(
             text="<br>".join(full_space_messages),
@@ -159,13 +170,17 @@ def make_scene_figure(vectors: list, spans: list | None = None,
             showarrow=False, font=dict(size=16),
         )
 
+    scene_kwargs = dict(
+        xaxis=dict(range=[-extent, extent], title="x", showspikes=False),
+        yaxis=dict(range=[-extent, extent], title="y", showspikes=False),
+        zaxis=dict(range=[-extent, extent], title="z", showspikes=False),
+        aspectmode="cube",
+    )
+    if camera is not None:
+        scene_kwargs["camera"] = camera
+
     fig.update_layout(
-        scene=dict(
-            xaxis=dict(range=[-extent, extent], title="x", showspikes=False),
-            yaxis=dict(range=[-extent, extent], title="y", showspikes=False),
-            zaxis=dict(range=[-extent, extent], title="z", showspikes=False),
-            aspectmode="cube",
-        ),
+        scene=scene_kwargs,
         margin=dict(l=0, r=0, t=30, b=0),
         uirevision="constant",
         scene_uirevision="constant",
@@ -274,11 +289,11 @@ def span_input_row(index: int) -> html.Div:
     first also gets a remove button."""
     children = [
         dcc.Input(id={"type": "span-row-input", "axis": "x", "index": index},
-                  type="number", placeholder="x", value=0, style={"width": "60px"}),
+                  type="number", placeholder="x", value=0, style={"width": "60px"}, className="app-input"),
         dcc.Input(id={"type": "span-row-input", "axis": "y", "index": index},
-                  type="number", placeholder="y", value=0, style={"width": "60px"}),
+                  type="number", placeholder="y", value=0, style={"width": "60px"}, className="app-input"),
         dcc.Input(id={"type": "span-row-input", "axis": "z", "index": index},
-                  type="number", placeholder="z", value=0, style={"width": "60px"}),
+                  type="number", placeholder="z", value=0, style={"width": "60px"}, className="app-input"),
     ]
     if index != 0:
         children.append(
@@ -305,7 +320,7 @@ def matrix_input_grid() -> html.Div:
                 style={"display": "flex", "gap": "10px"},
                 children=[
                     dcc.Input(id=f"matrix-{r}{c}", type="number",
-                              value=1 if r == c else 0, style={"width": "60px"})
+                              value=1 if r == c else 0, style={"width": "60px"}, className="app-input")
                     for c in range(3)
                 ],
             )
@@ -508,26 +523,19 @@ def _transform_trace_offset(vectors: list, spans: list) -> int:
     span_count = sum(len(make_span_traces(independent_basis(s["vectors"]), 1, s["color"])) for s in spans)
     return span_count + 2 * len(vectors) + 1   # +1 skips the static dashed cube trace
 
-SIDEBAR_STYLE = {
-    "flex-shrink": "0", "display": "flex", "flex-direction": "column",
-    "gap": "10px", "transition": "width 0.2s", "padding-top": "20px",
-    "padding-left": "10px", "padding-right": "10px",
-    "box-shadow": "2px 0 12px rgba(0, 0, 0, 0.5)", "background-color": "gray",
-}
-
 # ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
 app = dash.Dash(__name__, assets_folder="../assets")
 app.title = "Vector Space Visualizer"
 
-initial_vector = build_vector(1, 1, 1)
-
 SIDEBAR_STYLE = {
     "flex-shrink": "0", "display": "flex", "flex-direction": "column",
     "gap": "10px", "transition": "width 0.2s", "padding-top": "20px",
     "padding-left": "10px", "padding-right": "10px",
-    "box-shadow": "2px 0 12px rgba(0, 0, 0, 0.5)", "background-color": "gray",
+    "box-shadow": "2px 0 12px rgba(0, 0, 0, 0.5)", "background-color": "#232A3B",
+    "height": "100%", "min-height": "0", "overflow-y": "auto", "position": "relative",
+    "z-index": "2", "box-sizing": "border-box"
 }
 
 app.layout = html.Div(
@@ -538,17 +546,19 @@ app.layout = html.Div(
             children=[
                 html.Div(
                     id="sidebar",
-                    style={**SIDEBAR_STYLE, "width": "60px"},
+                    style={**SIDEBAR_STYLE, "width": "100px"},
                     children=[
-                        dcc.Store(id="vectors-store", data=[initial_vector]),
+                        dcc.Store(id="camera-store", data=None),
+                        dcc.Store(id="vectors-store", data=[]),
                         dcc.Store(id="span-vectors-store", data=[]),
                         dcc.Store(id="transform-store", data=None),
-                        dcc.Interval(id="blend-interval", interval=25, n_intervals=0, disabled=True),
+                        dcc.Store(id="restyle-dummy"),
+                        dcc.Interval(id="blend-interval", interval=16, n_intervals=0, disabled=True),
                         dcc.Store(id="sidebar-state", data={
                             "add_vector_open": False, "span_open": False, "transform_open": False,
                         }),
 
-                        html.Button("+ Add Vector", id="toggle-add-vector-button", n_clicks=0),
+                        html.Button("+ Add Vector", id="toggle-add-vector-button", n_clicks=0, className="app-button"),
                         html.Div(
                             id="add-vector-fields",
                             style={"display": "none", "flex-direction": "column", "gap": "10px", "margin-top": "10px"},
@@ -556,27 +566,27 @@ app.layout = html.Div(
                                 html.Div(
                                     style={"display": "flex", "gap": "10px"},
                                     children=[
-                                        dcc.Input(id="input-x", type="number", placeholder="x", value=0, style={"width": "60px"}),
-                                        dcc.Input(id="input-y", type="number", placeholder="y", value=0, style={"width": "60px"}),
-                                        dcc.Input(id="input-z", type="number", placeholder="z", value=0, style={"width": "60px"}),
+                                        dcc.Input(id="input-x", type="number", placeholder="x", value=0, style={"width": "60px"}, className="app-input"),
+                                        dcc.Input(id="input-y", type="number", placeholder="y", value=0, style={"width": "60px"}, className="app-input"),
+                                        dcc.Input(id="input-z", type="number", placeholder="z", value=0, style={"width": "60px"}, className="app-input"),
                                     ],
                                 ),
-                                html.Button("Create Vector", id="add-vector-button", n_clicks=0),
+                                html.Button("Create Vector", id="add-vector-button", n_clicks=0, className="app-button"),
                             ],
                         ),
 
-                        html.Button("+ Span", id="toggle-span-button", n_clicks=0),
+                        html.Button("+ Span", id="toggle-span-button", n_clicks=0, className="app-button"),
                         html.Div(
                             id="span-fields",
                             style={"display": "none", "flex-direction": "column", "gap": "10px", "margin-top": "10px"},
                             children=[
                                 html.Div(id="span-input-rows", children=[span_input_row(0)]),
-                                html.Button("+ Add another vector", id="add-span-row-button", n_clicks=0),
-                                html.Button("Show Span", id="show-span-button", n_clicks=0),
+                                html.Button("+ Add another vector", id="add-span-row-button", n_clicks=0, className="app-button"),
+                                html.Button("Show Span", id="show-span-button", n_clicks=0, className="app-button"),
                             ],
                         ),
 
-                        html.Button("+ Transform", id="toggle-transform-button", n_clicks=0),
+                        html.Button("+ Transform", id="toggle-transform-button", n_clicks=0, className="app-button"),
                         html.Div(
                             id="transform-fields",
                             style={"display": "none", "flex-direction": "column", "gap": "10px", "margin-top": "10px"},
@@ -585,8 +595,8 @@ app.layout = html.Div(
                                 html.Div(
                                     style={"display": "flex", "gap": "10px"},
                                     children=[
-                                        html.Button("Apply", id="apply-transform-button", n_clicks=0),
-                                        html.Button("Reset", id="reset-transform-button", n_clicks=0),
+                                        html.Button("Apply", id="apply-transform-button", n_clicks=0, className="app-button"),
+                                        html.Button("Reset", id="reset-transform-button", n_clicks=0, className="app-button"),
                                     ],
                                 ),
                             ],
@@ -598,7 +608,7 @@ app.layout = html.Div(
                     children=[
                         dcc.Graph(
                             id="vector-plot",
-                            figure=make_scene_figure([initial_vector]),
+                            figure=make_scene_figure([]),
                             style={"height": "100%"},
                         ),
                     ],
@@ -616,7 +626,7 @@ app.layout = html.Div(
             children=[
                 html.Div(
                     id="sliders-container",
-                    children=build_slider_cards([initial_vector]),
+                    children=build_slider_cards([]),
                     style={"display": "contents"},
                 ),
                 html.Div(
@@ -638,6 +648,33 @@ app.layout = html.Div(
             ],
         ),
     ],
+)
+
+# Callback pentru pasul animației
+app.clientside_callback(
+    dash.ClientsideFunction(
+        namespace="clientside",
+        function_name="stepAnimation"
+    ),
+    dash.Output("blend-slider", "value", allow_duplicate=True),
+    dash.Output("blend-interval", "disabled", allow_duplicate=True),
+    dash.Input("blend-interval", "n_intervals"),
+    dash.State("blend-slider", "value"),
+    prevent_initial_call=True,
+)
+
+# Callback pentru actualizarea graficului
+app.clientside_callback(
+    dash.ClientsideFunction(
+        namespace="clientside",
+        function_name="restylePlot"
+    ),
+    dash.Output("restyle-dummy", "data"),
+    dash.Input("blend-slider", "value"),
+    dash.State("transform-store", "data"),
+    dash.State("vectors-store", "data"),
+    dash.State("span-vectors-store", "data"),
+    prevent_initial_call=True,
 )
 
 def _section_style(is_open: bool) -> dict:
@@ -666,7 +703,7 @@ def toggle_sidebar_sections(add_clicks, span_clicks, transform_clicks, state):
         state[key] = not state[key]
 
     any_open = any(state.values())
-    sidebar_style = {**SIDEBAR_STYLE, "width": "260px" if any_open else "60px"}
+    sidebar_style = {**SIDEBAR_STYLE, "width": "260px" if any_open else "100px"}
     return (sidebar_style,
             _section_style(state["add_vector_open"]),
             _section_style(state["span_open"]),
@@ -747,10 +784,6 @@ def _handle_add(input_x, input_y, input_z, current_vectors, current_sliders):
 
 
 def _handle_remove(index, current_vectors):
-    if len(current_vectors) <= 1:
-        # Don't allow removing the last vector; just rebuild as-is.
-        return current_vectors, build_slider_cards(current_vectors)
-
     updated_vectors = [v for i, v in enumerate(current_vectors) if i != index]
     # Each remaining vector keeps its OWN stored slider_range — no recentering.
     return updated_vectors, build_slider_cards(updated_vectors)
@@ -801,7 +834,7 @@ def handle_vector_updates(n_clicks, remove_clicks, x_values, y_values, z_values,
     vectors, sliders = _handle_slider_move(x_values, y_values, z_values, current_vectors)
     return vectors, sliders, *NO_FIELD_CHANGE
 
-ANIMATION_STEP = 0.02
+ANIMATION_STEP = 0.01
 
 @app.callback(
     dash.Output("transform-store", "data"),
@@ -845,56 +878,15 @@ def update_transform_card(matrix, blend):
     return CARD_STYLE, [html.Div(line) for line in lines]
 
 @app.callback(
-    dash.Output("blend-slider", "value", allow_duplicate=True),
-    dash.Output("blend-interval", "disabled", allow_duplicate=True),
-    dash.Input("blend-interval", "n_intervals"),
-    dash.State("blend-slider", "value"),
-    prevent_initial_call=True,
-)
-def step_blend_animation(n_intervals, current_blend):
-    next_blend = current_blend + ANIMATION_STEP
-    if next_blend >= 1:
-        return 1, True   # snap to exactly 1, then stop
-    return next_blend, False
-
-@app.callback(
-    dash.Output("vector-plot", "figure", allow_duplicate=True),
-    dash.Input("blend-slider", "value"),
-    dash.State("transform-store", "data"),
-    dash.State("vectors-store", "data"),
-    dash.State("span-vectors-store", "data"),
-    dash.State("vector-plot", "figure"),
-    prevent_initial_call=True,
-)
-def patch_blend(blend, transform, vectors, spans, current_figure):
-    if not transform:
-        return dash.no_update
-
-    offset = _transform_trace_offset(vectors, spans)
-    patch_values = _transform_patch_values(transform, blend, vectors)
-
-    # The full rebuild hasn't added the transform traces to the figure yet —
-    # skip this tick rather than patch indices that don't exist.
-    if offset + len(patch_values) > len(current_figure["data"]):
-        return dash.no_update
-
-    patched = Patch()
-    for i, fields in enumerate(patch_values):
-        for key, value in fields.items():
-            patched["data"][offset + i][key] = value
-    return patched
-    
-# ---------------------------------------------------------------------------
-# Callback: redraw plot whenever the store changes
-# ---------------------------------------------------------------------------
-@app.callback(
     dash.Output("vector-plot", "figure"),
     dash.Input("vectors-store", "data"),
     dash.Input("span-vectors-store", "data"),
     dash.Input("transform-store", "data"),
+    dash.State("blend-slider", "value"),
+    dash.State("camera-store", "data"),
 )
-def update_plot_from_store(vectors, spans, transform):
-    return make_scene_figure(vectors, spans, transform, blend=0)
+def update_plot_from_store(vectors, spans, transform, blend, camera):
+    return make_scene_figure(vectors, spans, transform, blend=blend, camera=camera)
 
 @app.callback(
     dash.Output("span-cards-container", "children"),
@@ -902,6 +894,17 @@ def update_plot_from_store(vectors, spans, transform):
 )
 def update_span_cards(spans: list) -> list:
     return build_span_cards(spans)
+
+@app.callback(
+    dash.Output("camera-store", "data"),
+    dash.Input("vector-plot", "relayoutData"),
+    prevent_initial_call=True,
+)
+def capture_camera(relayout_data):
+    # relayoutData conține "scene.camera" doar când userul a rotit/zoom-at manual
+    if relayout_data and "scene.camera" in relayout_data:
+        return relayout_data["scene.camera"]
+    return dash.no_update
 
 if __name__ == "__main__":
     app.run(debug=True)
