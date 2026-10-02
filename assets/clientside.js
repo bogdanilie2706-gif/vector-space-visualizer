@@ -62,8 +62,12 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
             scatterIdx.push(idx); sX.push(x); sY.push(y); sZ.push(z);
         }
         function addCone(idx, x, y, z, u, v, w) {
-            coneIdx.push(idx); cX.push(x); cY.push(y); cZ.push(z); cU.push(u); cV.push(v); cW.push(w);
+        // Plotly bug prevention: zero-length Cone traces break the layout and reset zoom
+        if (Math.abs(u[0]) < 1e-5 && Math.abs(v[0]) < 1e-5 && Math.abs(w[0]) < 1e-5) {
+          u[0] = 1e-5; 
         }
+        coneIdx.push(idx); cX.push(x); cY.push(y); cZ.push(z); cU.push(u); cV.push(v); cW.push(w);
+      }
 
         // 1. Cube edges & Mesh
         addScatter(traceIdx++, edgeXs, edgeYs, edgeZs);
@@ -105,7 +109,7 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
             
             // Draw the static line based on the original vector 'v'
             let max_c = Math.max(Math.abs(v[0]), Math.abs(v[1]), Math.abs(v[2]));
-            let t = max_c > 1e-9 ? extent / max_c : 0;
+            let t = max_c > 1e-9 ? (extent * 0.99) / max_c : 0;
             
             addScatter(traceIdx++, [-t*v[0], t*v[0]], [-t*v[1], t*v[1]], [-t*v[2], t*v[2]]);
             

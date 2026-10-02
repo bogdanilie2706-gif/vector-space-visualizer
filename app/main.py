@@ -136,6 +136,10 @@ def make_vector_traces(start: dict, end: dict, color: str = "royalblue") -> list
     dx = end["x"] - start["x"]
     dy = end["y"] - start["y"]
     dz = end["z"] - start["z"]
+
+    if abs(dx) < 1e-5 and abs(dy) < 1e-5 and abs(dz) < 1e-5:
+        dx = 1e-5
+
     shaft_end = {
         "x": start["x"] + dx * (1 - HEAD_FRACTION),
         "y": start["y"] + dy * (1 - HEAD_FRACTION),
@@ -497,7 +501,7 @@ def make_transform_traces(matrix: list, t: float, vectors: list, extent: float =
         
         # Calculate line scaling based on the ORIGINAL vector 'v', not 'v_trans'
         max_c = max(abs(c) for c in v)
-        t_scale = extent / max_c if max_c > 1e-9 else 0
+        t_scale = (extent * 0.99) / max_c if max_c > 1e-9 else 0
         
         line_pts = (
             (-t_scale * v[0], t_scale * v[0]),
