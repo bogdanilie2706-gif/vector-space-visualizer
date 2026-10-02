@@ -1,8 +1,8 @@
 import dash
 from dash import dcc, html
-from dash import Patch
 import plotly.graph_objects as go
 import math
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -10,19 +10,14 @@ import math
 HEAD_FRACTION = 0.3       # fraction of a vector's length occupied by the arrowhead
 SLIDER_PADDING = 5        # slider range is created_value ± this, fixed at creation time
 MIN_AXIS_EXTENT = 5       # plot never shows a smaller range than [-5, 5]
-
+EIGEN_COLOR = "#FFD700"   # Gold/Yellow for Eigenvectors
 
 # ---------------------------------------------------------------------------
-# Data helpers — building/shaping vector data
+# Data helpers – building/shaping vector data
 # ---------------------------------------------------------------------------
 def build_vector(x: float, y: float, z: float, start: dict | None = None) -> dict:
-    """Create a new vector's data, including a FIXED slider range computed
-    once from the given values. This range is never recalculated later —
-    that's what keeps slider ranges stable when other vectors are added
-    or removed."""
     if start is None:
         start = {"x": 0, "y": 0, "z": 0}
-
     end = {"x": x, "y": y, "z": z}
     slider_range = {
         axis: (end[axis] - SLIDER_PADDING, end[axis] + SLIDER_PADDING)
@@ -30,32 +25,122 @@ def build_vector(x: float, y: float, z: float, start: dict | None = None) -> dic
     }
     return {"start": start, "end": end, "slider_range": slider_range}
 
-
 def with_updated_end(vector: dict, x: float, y: float, z: float) -> dict:
-    """Return a copy of `vector` with a new end point, keeping its
-    start and (crucially) its original slider_range untouched."""
     return {
         "start": vector["start"],
         "end": {"x": x, "y": y, "z": z},
         "slider_range": vector["slider_range"],
     }
 
+def compute_eigen_analysis(matrix: list) -> dict:
+    """Analyze real eigenvalues, algebraic/geometric multiplicities,
+    eigenvectors, and diagonalizability over R for a 3x3 matrix."""
+    try:
+        arr = np.array(matrix, dtype=float)
+        vals, vecs = np.linalg.eig(arr)
+        
+        # Filter real eigenvalues
+        real_mask = np.isreal(vals)
+        if not np.any(real_mask):
+            return {
+                "eigen_data": [],
+                "is_diagonalizable": False,
+                "reason": "No real eigenvalues (e.g., pure rotation)."
+            }
+
+        # Group eigenvalues by value (considering floating point tolerance)
+        real_vals = np.real(vals[real_mask])
+        unique_groups = []
+        
+        for val in real_vals:
+            found = False
+            for group in unique_groups:
+                if math.isclose(val, group["val"], abs_tol=1e-4):
+                    group["alg_mult"] += 1
+                    found = True
+                    break
+            if not found:
+                unique_groups.append({"val": float(val), "alg_mult": 1})
+
+        eigen_data = []
+        total_geom_mult = 0
+
+        for group in unique_groups:
+            val = group["val"]
+            alg_mult = group["alg_mult"]
+            
+            # Geometric multiplicity = dim(NullSpace(A - lambda * I)) = 3 - rank(A - lambda * I)
+            m_adj = arr - val * np.eye(3)
+            rank = np.linalg.matrix_rank(m_adj, tol=1e-4)
+            geom_mult = 3 - rank
+            total_geom_mult += geom_mult
+
+            # Extract corresponding eigenvectors from numpy result
+            group_vecs = []
+            for idx in range(len(vals)):
+                if np.isreal(vals[idx]) and math.isclose(np.real(vals[idx]), val, abs_tol=1e-4):
+                    v = vecs[:, idx]
+                    if np.all(np.isreal(v)):
+                        v_tuple = tuple(float(x) for x in np.real(v))
+                        norm = math.sqrt(sum(c ** 2 for c in v_tuple))
+                        if norm > 1e-6:
+                            normalized_vec = tuple(c / norm for c in v_tuple)
+                            # Avoid duplicate/parallel vectors in display list
+                            if not any(abs(_dot(normalized_vec, existing)) > 0.999 for existing in group_vecs):
+                                group_vecs.append(normalized_vec)
+
+            eigen_data.append({
+                "val": val,
+                "alg_mult": alg_mult,
+                "geom_mult": geom_mult,
+                "vecs": group_vecs
+            })
+
+        # A 3x3 real matrix is diagonalizable over R if sum of geometric multiplicities is 3
+        # and all 3 eigenvalues are real.
+        all_real = (len(real_vals) == 3)
+        is_diag = all_real and (total_geom_mult == 3)
+
+        if not all_real:
+            reason = "Complex eigenvalues present (cannot be diagonalized over ℝ)."
+        elif not is_diag:
+            reason = "Defective matrix: geometric multiplicity < algebraic multiplicity."
+        else:
+            reason = "Matrix has 3 linearly independent eigenvectors."
+
+        return {
+            "eigen_data": eigen_data,
+            "is_diagonalizable": is_diag,
+            "reason": reason
+        }
+    except Exception:
+        return {
+            "eigen_data": [],
+            "is_diagonalizable": False,
+            "reason": "Error calculating eigenvalues."
+        }
+
+def compute_eigen_data(matrix: list) -> list:
+    """Helper for plotting: returns flat list of dicts [{'val': float, 'vec': tuple}]"""
+    analysis = compute_eigen_analysis(matrix)
+    flat_data = []
+    for item in analysis["eigen_data"]:
+        for vec in item["vecs"]:
+            flat_data.append({"val": item["val"], "vec": vec})
+    return flat_data
+
 # ---------------------------------------------------------------------------
-# Drawing — turning vector data into a Plotly figure
+# Drawing – turning vector data into a Plotly figure
 # ---------------------------------------------------------------------------
 def make_vector_traces(start: dict, end: dict, color: str = "royalblue") -> list:
-    """Build the traces (shaft + arrowhead) for ONE vector, from `start` to `end`."""
     dx = end["x"] - start["x"]
     dy = end["y"] - start["y"]
     dz = end["z"] - start["z"]
-
-    # Shaft stops short of the tip so it doesn't poke through the cone.
     shaft_end = {
         "x": start["x"] + dx * (1 - HEAD_FRACTION),
         "y": start["y"] + dy * (1 - HEAD_FRACTION),
         "z": start["z"] + dz * (1 - HEAD_FRACTION),
     }
-
     shaft = go.Scatter3d(
         x=[start["x"], shaft_end["x"]],
         y=[start["y"], shaft_end["y"]],
@@ -65,7 +150,6 @@ def make_vector_traces(start: dict, end: dict, color: str = "royalblue") -> list
         showlegend=False,
         hoverinfo="skip",
     )
-
     arrowhead = go.Cone(
         x=[end["x"]], y=[end["y"]], z=[end["z"]],
         u=[dx], v=[dy], w=[dz],
@@ -75,16 +159,11 @@ def make_vector_traces(start: dict, end: dict, color: str = "royalblue") -> list
         colorscale=[[0, color], [1, color]],
         showscale=False,
     )
-
     return [shaft, arrowhead]
 
 def make_span_traces(basis: list, extent: float, color: str = "orange") -> list:
-    """Traces for the span of an already-independent `basis`.
-    1 vector -> line through the origin, 2 vectors -> plane, otherwise nothing."""
     if len(basis) == 1:
         d = basis[0]
-        # Scale so the largest component reaches the axis edge; the other
-        # two components are then automatically inside the cube.
         t = extent / max(abs(c) for c in d)
         return [go.Scatter3d(
             x=[-t * d[0], t * d[0]],
@@ -95,18 +174,12 @@ def make_span_traces(basis: list, extent: float, color: str = "orange") -> list:
             showlegend=False,
             hoverinfo="skip",
         )]
-
     if len(basis) == 2:
         v1, v2 = basis
-        # Every point is s*v1 + t*v2. Choosing s,t in [-k, k] with this k
-        # guarantees no coordinate can exceed the axis range.
         k = extent / (max(abs(c) for c in v1) + max(abs(c) for c in v2))
         params = [-k, k]
-
         def coord(i):
-            # 2x2 grid of the i-th coordinate (0=x, 1=y, 2=z)
             return [[s * v1[i] + t * v2[i] for s in params] for t in params]
-
         return [go.Surface(
             x=coord(0), y=coord(1), z=coord(2),
             opacity=0.4,
@@ -114,21 +187,16 @@ def make_span_traces(basis: list, extent: float, color: str = "orange") -> list:
             colorscale=[[0, color], [1, color]],
             hoverinfo="skip",
         )]
-
-    return []  # 0 vectors (only origin) or 3 vectors (handled with a message)
+    return []
 
 def _compute_axis_extent(vectors: list) -> float:
-    """Find how far the plot's axes need to reach to fit every vector,
-    with some padding, never smaller than MIN_AXIS_EXTENT."""
     coords = []
     for vector in vectors:
         coords += [vector["start"]["x"], vector["end"]["x"]]
         coords += [vector["start"]["y"], vector["end"]["y"]]
         coords += [vector["start"]["z"], vector["end"]["z"]]
-
     if not coords:
         return MIN_AXIS_EXTENT
-
     max_extent = max(max(abs(c) for c in coords), MIN_AXIS_EXTENT)
     return math.ceil(max_extent * 1.2)
 
@@ -139,7 +207,6 @@ def make_scene_figure(vectors: list, spans: list | None = None,
     extent = _compute_axis_extent(vectors)
     if transform:
         extent = max(extent, _transform_extent(transform, vectors))
-
     full_space_messages = []
     for i, span in enumerate(spans or []):
         basis = independent_basis(span["vectors"])
@@ -147,38 +214,31 @@ def make_scene_figure(vectors: list, spans: list | None = None,
             fig.add_trace(trace)
         if len(basis) == 3:
             full_space_messages.append(f"Span {i + 1} spans all of 3D space")
-
     for vector in vectors:
         for trace in make_vector_traces(vector["start"], vector["end"]):
             fig.add_trace(trace)
-
     if transform:
-        for trace in make_transform_traces(transform, blend, vectors):
+        for trace in make_transform_traces(transform, blend, vectors, extent):
             fig.add_trace(trace)
-
     if len(fig.data) == 0:
-        # Doar acum figura e cu adevărat goală — fără asta Plotly cade pe layout 2D.
         fig.add_trace(go.Scatter3d(
             x=[0], y=[0], z=[0], mode="markers", marker=dict(size=0, opacity=0),
             showlegend=False, hoverinfo="skip",
         ))
-
     if full_space_messages:
         fig.add_annotation(
             text="<br>".join(full_space_messages),
             xref="paper", yref="paper", x=0.5, y=1.0, yanchor="top",
             showarrow=False, font=dict(size=16),
         )
-
     scene_kwargs = dict(
-        xaxis=dict(range=[-extent, extent], title="x", showspikes=False),
-        yaxis=dict(range=[-extent, extent], title="y", showspikes=False),
-        zaxis=dict(range=[-extent, extent], title="z", showspikes=False),
+        xaxis=dict(range=[-extent, extent], title="x", showspikes=False, autorange=False),
+        yaxis=dict(range=[-extent, extent], title="y", showspikes=False, autorange=False),
+        zaxis=dict(range=[-extent, extent], title="z", showspikes=False, autorange=False),
         aspectmode="cube",
     )
     if camera is not None:
         scene_kwargs["camera"] = camera
-
     fig.update_layout(
         scene=scene_kwargs,
         margin=dict(l=0, r=0, t=30, b=0),
@@ -186,7 +246,6 @@ def make_scene_figure(vectors: list, spans: list | None = None,
         scene_uirevision="constant",
     )
     return fig
-
 
 # ---------------------------------------------------------------------------
 # UI builders
@@ -205,13 +264,9 @@ def _make_slider(index: int, axis: str, value: float, value_range: tuple) -> htm
         style={"margin-bottom": "10px"},
     )
 
-
 def vector_slider_group(index: int, vector: dict) -> html.Div:
-    """Build one card of x/y/z sliders for the vector at `index`.
-    Uses the vector's OWN stored slider_range — never recalculated here."""
     end = vector["end"]
     slider_range = vector["slider_range"]
-
     return html.Div(
         children=[
             html.Div(
@@ -237,13 +292,11 @@ def vector_slider_group(index: int, vector: dict) -> html.Div:
     )
 
 def span_card(index: int, span: dict) -> html.Div:
-    """One card describing a span: color swatch, its vectors, and what it spans."""
     basis = independent_basis(span["vectors"])
     vector_lines = [
         html.Div(f"v{i + 1} = ({x:g}, {y:g}, {z:g})", style={"font-size": "13px"})
         for i, (x, y, z) in enumerate(_as_tuple(v) for v in span["vectors"])
     ]
-
     return html.Div(
         children=[
             html.Div(
@@ -280,13 +333,9 @@ def build_span_cards(spans: list) -> list:
     return [span_card(i, span) for i, span in enumerate(spans)]
 
 def build_slider_cards(vectors: list) -> list:
-    """Rebuild every slider card from the current vectors list, WITHOUT
-    touching any vector's stored slider_range."""
     return [vector_slider_group(i, vector) for i, vector in enumerate(vectors)]
 
 def span_input_row(index: int) -> html.Div:
-    """One row of x/y/z inputs for the span feature. Every row except the
-    first also gets a remove button."""
     children = [
         dcc.Input(id={"type": "span-row-input", "axis": "x", "index": index},
                   type="number", placeholder="x", value=0, style={"width": "60px"}, className="app-input"),
@@ -312,7 +361,6 @@ def span_input_row(index: int) -> html.Div:
     )
 
 def matrix_input_grid() -> html.Div:
-    """3x3 grid of number inputs, identity by default. Row r, column c is entry A[r][c]."""
     return html.Div(
         style={"display": "flex", "flex-direction": "column", "gap": "10px"},
         children=[
@@ -329,16 +377,14 @@ def matrix_input_grid() -> html.Div:
     )
 
 # ---------------------------------------------------------------------------
-# Span helpers — figuring out what a set of vectors spans
+# Span & Matrix helpers
 # ---------------------------------------------------------------------------
-EPSILON = 1e-9  # anything smaller than this counts as zero (float safety)
-MAX_SPAN_VECTORS = 3      # most vectors the span feature accepts
+EPSILON = 1e-9
+MAX_SPAN_VECTORS = 3
 SPAN_COLORS = ["orange", "mediumseagreen", "mediumpurple", "crimson", "teal", "goldenrod"]
 SPAN_LABELS = {0: "Just the origin", 1: "A line", 2: "A plane", 3: "All of 3D space"}
 
-
 def _next_span_color(spans: list) -> str:
-    """First palette color not already used; cycle if all are taken."""
     used = {span["color"] for span in spans}
     for color in SPAN_COLORS:
         if color not in used:
@@ -346,9 +392,7 @@ def _next_span_color(spans: list) -> str:
     return SPAN_COLORS[len(spans) % len(SPAN_COLORS)]
 
 def _as_tuple(v: dict) -> tuple:
-    # Empty dcc.Input fields come back as None, so treat those as 0.
     return (v["x"] or 0, v["y"] or 0, v["z"] or 0)
-
 
 def _cross(a: tuple, b: tuple) -> tuple:
     return (
@@ -357,70 +401,48 @@ def _cross(a: tuple, b: tuple) -> tuple:
         a[0] * b[1] - a[1] * b[0],
     )
 
-
 def _dot(a: tuple, b: tuple) -> float:
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
-
 def independent_basis(span_vectors: list) -> list:
-    """Return the largest linearly independent subset, in input order.
-    len(result) is the dimension of the span:
-      0 -> just the origin, 1 -> a line, 2 -> a plane, 3 -> all of 3D."""
     basis = []
     for raw in span_vectors:
         v = _as_tuple(raw)
-
         if len(basis) == 0:
-            # Only need it to be non-zero.
             if _dot(v, v) > EPSILON:
                 basis.append(v)
-
         elif len(basis) == 1:
-            # Independent of the first if the cross product isn't zero
-            # (cross product is zero exactly when vectors are parallel).
             c = _cross(basis[0], v)
             if _dot(c, c) > EPSILON:
                 basis.append(v)
-
         elif len(basis) == 2:
-            # Independent of both if the triple product (determinant) isn't zero,
-            # i.e. v is not in the plane of the first two.
             triple = _dot(_cross(basis[0], basis[1]), v)
             if abs(triple) > EPSILON:
                 basis.append(v)
-
     return basis
 
 IDENTITY = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
-MATRIX_INPUT_IDS = [f"matrix-{r}{c}" for r in range(3) for c in range(3)]  # row-major
-
-BASIS_COLORS = ["#D85A30", "#1D9E75", "#7F77DD"]   # where x, y, z land
+MATRIX_INPUT_IDS = [f"matrix-{r}{c}" for r in range(3) for c in range(3)]
+BASIS_COLORS = ["#D85A30", "#1D9E75", "#7F77DD"]
 CUBE_ORIGINAL_COLOR = "gray"
 CUBE_IMAGE_COLOR = "steelblue"
-IMAGE_VECTOR_COLOR = "deeppink"                     # your vectors after the matrix
-
+IMAGE_VECTOR_COLOR = "deeppink"
 CARD_STYLE = {"padding": "16px", "border-radius": "12px", "background-color": "white",
               "box-shadow": "0 2px 8px rgba(0, 0, 0, 0.08)"}
 
 def blend_matrix(matrix: list, t: float) -> list:
-    """(1 - t) * identity + t * matrix — slides smoothly from 'nothing
-    happened' at t=0 to the full transformation at t=1."""
     return [[(1 - t) * IDENTITY[r][c] + t * matrix[r][c] for c in range(3)] for r in range(3)]
-
 
 def apply_matrix(m: list, p: tuple) -> tuple:
     return tuple(sum(m[r][c] * p[c] for c in range(3)) for r in range(3))
-
 
 def determinant(m: list) -> float:
     return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
             - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
             + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
 
-
 def _point(d: dict) -> tuple:
     return (d["x"], d["y"], d["z"])
-
 
 def _as_point_dict(p: tuple) -> dict:
     return {"x": p[0], "y": p[1], "z": p[2]}
@@ -431,7 +453,6 @@ _CUBE_FACES = [(0, 2, 6, 4), (1, 3, 7, 5), (0, 1, 5, 4), (2, 3, 7, 6), (0, 1, 3,
 CUBE_TRIANGLES = [tri for a, b, c, d in _CUBE_FACES for tri in ((a, b, c), (a, c, d))]
 
 def _cube_edges_trace(vertices: list, color: str, width: int, dash: str = "solid") -> go.Scatter3d:
-    """All 12 edges in ONE trace; None entries break the line between edges."""
     xs, ys, zs = [], [], []
     for a, b in CUBE_EDGES:
         for idx in (a, b):
@@ -445,12 +466,9 @@ def _cube_edges_trace(vertices: list, color: str, width: int, dash: str = "solid
                         line=dict(color=color, width=width, dash=dash),
                         showlegend=False, hoverinfo="skip")
 
-
-def make_transform_traces(matrix: list, t: float, vectors: list) -> list:
-    """Everything the transformation adds to the scene, at blend `t`."""
+def make_transform_traces(matrix: list, t: float, vectors: list, extent: float = MIN_AXIS_EXTENT) -> list:
     m = blend_matrix(matrix, t)
     moved = [apply_matrix(m, v) for v in CUBE_VERTICES]
-
     traces = [
         _cube_edges_trace(CUBE_VERTICES, CUBE_ORIGINAL_COLOR, width=2, dash="dash"),
         _cube_edges_trace(moved, CUBE_IMAGE_COLOR, width=4),
@@ -462,66 +480,91 @@ def make_transform_traces(matrix: list, t: float, vectors: list) -> list:
             color=CUBE_IMAGE_COLOR, opacity=0.15, showlegend=False, hoverinfo="skip",
         ),
     ]
-
     origin = {"x": 0, "y": 0, "z": 0}
     for column, color in enumerate(BASIS_COLORS):
-        tip = tuple(m[r][column] for r in range(3))   # column c of the matrix = image of basis vector c
+        tip = tuple(m[r][column] for r in range(3))
         traces += make_vector_traces(origin, _as_point_dict(tip), color)
-
     for vector in vectors:
         start = apply_matrix(m, _point(vector["start"]))
         end = apply_matrix(m, _point(vector["end"]))
         traces += make_vector_traces(_as_point_dict(start), _as_point_dict(end), IMAGE_VECTOR_COLOR)
 
+    # Eigenvector traces
+    eigen_data = compute_eigen_data(matrix)
+    for item in eigen_data:
+        v = item["vec"]
+        v_trans = apply_matrix(m, v)
+        
+        # Calculate line scaling based on the ORIGINAL vector 'v', not 'v_trans'
+        max_c = max(abs(c) for c in v)
+        t_scale = extent / max_c if max_c > 1e-9 else 0
+        
+        line_pts = (
+            (-t_scale * v[0], t_scale * v[0]),
+            (-t_scale * v[1], t_scale * v[1]),
+            (-t_scale * v[2], t_scale * v[2])
+        )
+        
+        traces.append(go.Scatter3d(
+            x=list(line_pts[0]), y=list(line_pts[1]), z=list(line_pts[2]),
+            mode="lines", line=dict(color=EIGEN_COLOR, width=3, dash="dashdot"),
+            showlegend=False, hoverinfo="skip"
+        ))
+        
+        # The vector arrow itself still uses 'v_trans' so it shrinks to 0
+        traces += make_vector_traces(origin, _as_point_dict(v_trans), EIGEN_COLOR)
+
     return traces
 
-
 def _transform_extent(matrix: list, vectors: list) -> int:
-    """Axis extent needed for the FULL transformation (t=1). Using the final
-    matrix, not the blended one, keeps the axes from jumping as you drag the slider."""
     points = [apply_matrix(matrix, v) for v in CUBE_VERTICES]
     for vector in vectors:
         points.append(apply_matrix(matrix, _point(vector["start"])))
         points.append(apply_matrix(matrix, _point(vector["end"])))
     return math.ceil(max(abs(c) for p in points for c in p) * 1.2)
 
-def _transform_patch_values(matrix: list, t: float, vectors: list) -> list:
-    """Coordinates for the DYNAMIC transform traces only, in the same order
-    make_transform_traces builds them — skipping the dashed original cube,
-    which never changes with t."""
+def _transform_patch_values(matrix: list, t: float, vectors: list, extent: float = MIN_AXIS_EXTENT) -> list:
     m = blend_matrix(matrix, t)
     moved = [apply_matrix(m, v) for v in CUBE_VERTICES]
     updates = []
-
     edge_pts = []
     for a, b in CUBE_EDGES:
         edge_pts += [moved[a], moved[b], None]
     updates.append({"x": [p[0] if p else None for p in edge_pts],
                     "y": [p[1] if p else None for p in edge_pts],
                     "z": [p[2] if p else None for p in edge_pts]})
-
     updates.append({"x": [p[0] for p in moved], "y": [p[1] for p in moved], "z": [p[2] for p in moved]})
-
     origin = (0, 0, 0)
     for column in range(3):
         tip = tuple(m[r][column] for r in range(3))
         shaft_end = tuple(tip[i] * (1 - HEAD_FRACTION) for i in range(3))
         updates.append({"x": [origin[0], shaft_end[0]], "y": [origin[1], shaft_end[1]], "z": [origin[2], shaft_end[2]]})
         updates.append({"x": [tip[0]], "y": [tip[1]], "z": [tip[2]], "u": [tip[0]], "v": [tip[1]], "w": [tip[2]]})
-
     for vector in vectors:
         start, end = apply_matrix(m, _point(vector["start"])), apply_matrix(m, _point(vector["end"]))
         shaft_end = tuple(start[i] + (end[i] - start[i]) * (1 - HEAD_FRACTION) for i in range(3))
         updates.append({"x": [start[0], shaft_end[0]], "y": [start[1], shaft_end[1]], "z": [start[2], shaft_end[2]]})
         updates.append({"x": [end[0]], "y": [end[1]], "z": [end[2]],
                         "u": [end[0]-start[0]], "v": [end[1]-start[1]], "w": [end[2]-start[2]]})
+
+    eigen_data = compute_eigen_data(matrix)
+    for item in eigen_data:
+        v = item["vec"]
+        v_trans = apply_matrix(m, v)
+        updates.append({
+            "x": [-extent * v_trans[0], extent * v_trans[0]],
+            "y": [-extent * v_trans[1], extent * v_trans[1]],
+            "z": [-extent * v_trans[2], extent * v_trans[2]],
+        })
+        shaft_end = tuple(v_trans[i] * (1 - HEAD_FRACTION) for i in range(3))
+        updates.append({"x": [origin[0], shaft_end[0]], "y": [origin[1], shaft_end[1]], "z": [origin[2], shaft_end[2]]})
+        updates.append({"x": [v_trans[0]], "y": [v_trans[1]], "z": [v_trans[2]], "u": [v_trans[0]], "v": [v_trans[1]], "w": [v_trans[2]]})
+
     return updates
 
-
 def _transform_trace_offset(vectors: list, spans: list) -> int:
-    """Index of the first DYNAMIC transform trace in the figure's trace list."""
     span_count = sum(len(make_span_traces(independent_basis(s["vectors"]), 1, s["color"])) for s in spans)
-    return span_count + 2 * len(vectors) + 1   # +1 skips the static dashed cube trace
+    return span_count + 2 * len(vectors) + 1
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -553,11 +596,10 @@ app.layout = html.Div(
                         dcc.Store(id="span-vectors-store", data=[]),
                         dcc.Store(id="transform-store", data=None),
                         dcc.Store(id="restyle-dummy"),
-                        dcc.Interval(id="blend-interval", interval=16, n_intervals=0, disabled=True),
+                        dcc.Interval(id="blend-interval", interval=40, n_intervals=0, disabled=True),
                         dcc.Store(id="sidebar-state", data={
                             "add_vector_open": False, "span_open": False, "transform_open": False,
                         }),
-
                         html.Button("+ Add Vector", id="toggle-add-vector-button", n_clicks=0, className="app-button"),
                         html.Div(
                             id="add-vector-fields",
@@ -574,7 +616,6 @@ app.layout = html.Div(
                                 html.Button("Create Vector", id="add-vector-button", n_clicks=0, className="app-button"),
                             ],
                         ),
-
                         html.Button("+ Span", id="toggle-span-button", n_clicks=0, className="app-button"),
                         html.Div(
                             id="span-fields",
@@ -585,7 +626,6 @@ app.layout = html.Div(
                                 html.Button("Show Span", id="show-span-button", n_clicks=0, className="app-button"),
                             ],
                         ),
-
                         html.Button("+ Transform", id="toggle-transform-button", n_clicks=0, className="app-button"),
                         html.Div(
                             id="transform-fields",
@@ -618,7 +658,7 @@ app.layout = html.Div(
         html.Div(
             id="cards-panel",
             style={
-                "display": "grid", "grid-template-columns": "repeat(auto-fill, minmax(220px, 1fr))",
+                "display": "grid", "grid-template-columns": "repeat(auto-fill, minmax(240px, 1fr))",
                 "gap": "16px", "padding": "16px", "box-shadow": "60px 0 12px rgba(0, 0, 0, 0.3)",
                 "background-color": "#f5f5f7", "position": "relative", "z-index": "1",
                 "flex-shrink": "0", "max-height": "40vh", "overflow-y": "auto",
@@ -650,7 +690,6 @@ app.layout = html.Div(
     ],
 )
 
-# Callback pentru pasul animației
 app.clientside_callback(
     dash.ClientsideFunction(
         namespace="clientside",
@@ -663,7 +702,6 @@ app.clientside_callback(
     prevent_initial_call=True,
 )
 
-# Callback pentru actualizarea graficului
 app.clientside_callback(
     dash.ClientsideFunction(
         namespace="clientside",
@@ -701,7 +739,6 @@ def toggle_sidebar_sections(add_clicks, span_clicks, transform_clicks, state):
     }.get(dash.ctx.triggered_id)
     if key:
         state[key] = not state[key]
-
     any_open = any(state.values())
     sidebar_style = {**SIDEBAR_STYLE, "width": "260px" if any_open else "100px"}
     return (sidebar_style,
@@ -711,23 +748,21 @@ def toggle_sidebar_sections(add_clicks, span_clicks, transform_clicks, state):
             state)
 
 def _row_index(row: dict) -> int:
-    """State comes back from the browser as plain dicts, not components;
-    a row's index lives in the id of the row Div."""
     return row["props"]["id"]["index"]
 
 def _handle_show_span(x_values, y_values, z_values, spans):
+    vecs = [{"x": x_values[i], "y": y_values[i], "z": z_values[i]}
+            for i in range(len(x_values))]
+    basis = independent_basis(vecs)
     new_span = {
-        "vectors": [{"x": x_values[i], "y": y_values[i], "z": z_values[i]}
-                    for i in range(len(x_values))],
+        "vectors": vecs,
         "color": _next_span_color(spans),
+        "dim": len(basis)  # Let JS know exactly how many dimensions this spans
     }
-    # Append the new span, and reset the input area to a single blank row.
     return [span_input_row(0)], spans + [new_span]
-
 
 def _handle_remove_span(index, spans):
     return dash.no_update, [span for i, span in enumerate(spans) if i != index]
-
 
 @app.callback(
     dash.Output("span-input-rows", "children"),
@@ -746,35 +781,23 @@ def _handle_remove_span(index, spans):
 def handle_span_rows(add_clicks, remove_row_clicks, show_clicks, remove_card_clicks,
                      rows, x_values, y_values, z_values, spans):
     triggered = dash.ctx.triggered_id
-
     if triggered == "add-span-row-button":
         if len(rows) >= MAX_SPAN_VECTORS:
             return dash.no_update, dash.no_update
         new_index = max(_row_index(row) for row in rows) + 1
         return rows + [span_input_row(new_index)], dash.no_update
-
     if triggered == "show-span-button":
         return _handle_show_span(x_values, y_values, z_values, spans)
-
     if isinstance(triggered, dict):
-        # Both remove buttons are created dynamically, and a fresh button can
-        # fire this callback with n_clicks=0 — only react to a real click.
         if not dash.ctx.triggered[0]["value"]:
             return dash.no_update, dash.no_update
-
         if triggered["type"] == "remove-span-row-button":
             remaining = [row for row in rows if _row_index(row) != triggered["index"]]
             return remaining, dash.no_update
-
         if triggered["type"] == "remove-span-card-button":
             return _handle_remove_span(triggered["index"], spans)
-
     return dash.no_update, dash.no_update
 
-# ---------------------------------------------------------------------------
-# Callback: add / remove / drag — split into small helpers, dispatched by
-# what actually triggered the callback (dash.ctx.triggered_id)
-# ---------------------------------------------------------------------------
 def _handle_add(input_x, input_y, input_z, current_vectors, current_sliders):
     new_vector = build_vector(input_x, input_y, input_z)
     updated_vectors = current_vectors + [new_vector]
@@ -782,21 +805,16 @@ def _handle_add(input_x, input_y, input_z, current_vectors, current_sliders):
     updated_sliders = current_sliders + [vector_slider_group(new_index, new_vector)]
     return updated_vectors, updated_sliders
 
-
 def _handle_remove(index, current_vectors):
     updated_vectors = [v for i, v in enumerate(current_vectors) if i != index]
-    # Each remaining vector keeps its OWN stored slider_range — no recentering.
     return updated_vectors, build_slider_cards(updated_vectors)
-
 
 def _handle_slider_move(x_values, y_values, z_values, current_vectors):
     updated_vectors = [
         with_updated_end(vector, x_values[i], y_values[i], z_values[i])
         for i, vector in enumerate(current_vectors)
     ]
-    # Sliders themselves are untouched — dash.no_update below.
     return updated_vectors, dash.no_update
-
 
 @app.callback(
     dash.Output("vectors-store", "data"),
@@ -816,25 +834,19 @@ def _handle_slider_move(x_values, y_values, z_values, current_vectors):
     dash.State("sliders-container", "children"),
     prevent_initial_call=True,
 )
-
 def handle_vector_updates(n_clicks, remove_clicks, x_values, y_values, z_values,
                           input_x, input_y, input_z, current_vectors, current_sliders):
     triggered = dash.ctx.triggered_id
-    NO_FIELD_CHANGE = (dash.no_update,) * 3   # leave input-x/y/z alone
-
+    NO_FIELD_CHANGE = (dash.no_update,) * 3
     if triggered == "add-vector-button":
         vectors, sliders = _handle_add(input_x or 0, input_y or 0, input_z or 0,
                                        current_vectors, current_sliders)
-        return vectors, sliders, 0, 0, 0   # reset the fields
-
+        return vectors, sliders, 0, 0, 0
     if isinstance(triggered, dict) and triggered.get("type") == "remove-vector-button":
         vectors, sliders = _handle_remove(triggered["index"], current_vectors)
         return vectors, sliders, *NO_FIELD_CHANGE
-
     vectors, sliders = _handle_slider_move(x_values, y_values, z_values, current_vectors)
     return vectors, sliders, *NO_FIELD_CHANGE
-
-ANIMATION_STEP = 0.01
 
 @app.callback(
     dash.Output("transform-store", "data"),
@@ -850,13 +862,15 @@ ANIMATION_STEP = 0.01
 def handle_transform(apply_clicks, reset_clicks, *values):
     if dash.ctx.triggered_id == "reset-transform-button":
         identity_values = [1 if r == c else 0 for r in range(3) for c in range(3)]
-        return (None, 1, True, 0, *identity_values)          # stop the animation
-
+        return (None, 1, True, 0, *identity_values)
+    
     if dash.ctx.triggered_id == "apply-transform-button":
         flat = [v or 0 for v in values]
         matrix = [flat[0:3], flat[3:6], flat[6:9]]
-        return (matrix, 0, False, 0, *[dash.no_update] * 9)  # start at 0, enable interval
-
+        eigen_data = compute_eigen_data(matrix)
+        # Store is now a dict containing both
+        return ({"matrix": matrix, "eigen_data": eigen_data}, 0, False, 0, *[dash.no_update] * 9)
+    
     return (dash.no_update,) * 13
 
 @app.callback(
@@ -865,16 +879,35 @@ def handle_transform(apply_clicks, reset_clicks, *values):
     dash.Input("transform-store", "data"),
     dash.Input("blend-slider", "value"),
 )
-def update_transform_card(matrix, blend):
-    if not matrix:
+def update_transform_card(transform_data, blend):
+    if not transform_data:
         return {"display": "none"}, []
-
+    
+    matrix = transform_data["matrix"]
     d = determinant(blend_matrix(matrix, blend))
     lines = [f"Blend: {blend:.2f}", f"Determinant: {d:.2f}"]
+    
     if abs(d) < 0.02:
         lines.append("Volume collapsed")
     elif d < 0:
         lines.append("Orientation flipped")
+
+    analysis = compute_eigen_analysis(matrix)
+    lines.append("Eigenvalues & Eigenvectors")
+    
+    if analysis["eigen_data"]:
+        for item in analysis["eigen_data"]:
+            val_str = f"λ = {item['val']:.2f}"
+            mult_str = f"(alg. mult = {item['alg_mult']}, geom = {item['geom_mult']})"
+            lines.append(f"{val_str} {mult_str}")
+            for vec in item["vecs"]:
+                lines.append(f"  v = ({vec[0]:.2f}, {vec[1]:.2f}, {vec[2]:.2f})")
+    
+    lines.append("Diagonalizability (over ℝ)")
+    is_diag_str = "yeah" if analysis["is_diagonalizable"] else "nope"
+    lines.append(f"Diagonalizable: {is_diag_str}")
+    lines.append(f"Reason: {analysis['reason']}")
+
     return CARD_STYLE, [html.Div(line) for line in lines]
 
 @app.callback(
@@ -885,8 +918,9 @@ def update_transform_card(matrix, blend):
     dash.State("blend-slider", "value"),
     dash.State("camera-store", "data"),
 )
-def update_plot_from_store(vectors, spans, transform, blend, camera):
-    return make_scene_figure(vectors, spans, transform, blend=blend, camera=camera)
+def update_plot_from_store(vectors, spans, transform_data, blend, camera):
+    matrix = transform_data["matrix"] if transform_data else None
+    return make_scene_figure(vectors, spans, matrix, blend=blend, camera=camera)
 
 @app.callback(
     dash.Output("span-cards-container", "children"),
@@ -901,7 +935,6 @@ def update_span_cards(spans: list) -> list:
     prevent_initial_call=True,
 )
 def capture_camera(relayout_data):
-    # relayoutData conține "scene.camera" doar când userul a rotit/zoom-at manual
     if relayout_data and "scene.camera" in relayout_data:
         return relayout_data["scene.camera"]
     return dash.no_update
